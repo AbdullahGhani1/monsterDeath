@@ -8,5 +8,5 @@ build/
 .vscode/
 coverage/
 *.tsbuildinfo
-assets/
+design/
 IMPLEMENTATION_PLAN.md
