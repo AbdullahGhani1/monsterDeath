@@ -55,15 +55,12 @@ class Game {
   }
 
   bindUI() {
-    document.querySelector('.action-grid')?.addEventListener('click', (e) => {
-      const btn = (e.target as HTMLElement).closest('.action-btn');
-      if (!btn) return;
-      
-      const label = btn.textContent?.trim().toLowerCase();
-      if (label === 'strike') playerAction('strike');
-      if (label === 'guard') playerAction('guard');
-      if (label === 'heal') playerAction('heal');
-      if (label === 'retreat') addLogEntry('Retreat not implemented yet.', 'system');
+    document.getElementById('btn-strike')?.addEventListener('click', () => playerAction('strike'));
+    document.getElementById('btn-guard')?.addEventListener('click', () => playerAction('guard'));
+    document.getElementById('btn-heal')?.addEventListener('click', () => playerAction('heal'));
+    document.getElementById('btn-retreat')?.addEventListener('click', () => {
+      addLogEntry('Attempting to retreat...', 'system');
+      // Logic for retreat could be added here
     });
   }
 
