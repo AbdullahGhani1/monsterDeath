@@ -5,7 +5,7 @@ export class AudioMixer {
   private musicGain: GainNode;
 
   constructor() {
-    this.context = new (window.AudioContext || (window as any).webkitAudioContext)();
+    this.context = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
     this.masterGain = this.context.createGain();
     this.sfxGain = this.context.createGain();
     this.musicGain = this.context.createGain();

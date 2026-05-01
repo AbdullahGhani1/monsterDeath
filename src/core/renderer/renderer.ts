@@ -44,6 +44,19 @@ export class Renderer {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
+  renderLuminance(playerX: number, playerY: number, radius: number) {
+    const screenPos = this.camera.worldToScreen(playerX, playerY);
+    const grad = this.ctx.createRadialGradient(
+      screenPos.x, screenPos.y, 0,
+      screenPos.x, screenPos.y, radius * this.camera.zoom
+    );
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, 'rgba(0,0,0,0.8)');
+
+    this.ctx.fillStyle = grad;
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+
   // Basic frustum culling check
   isVisible(x: number, y: number, width: number, height: number) {
     const screenPos = this.camera.worldToScreen(x, y);
