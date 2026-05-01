@@ -11,6 +11,10 @@ import { LevelGenerator } from './core/level/generator';
 import { createAISystem, createMonsterFSM } from './systems/ai';
 import { createPhysicsSystem } from './systems/physics';
 import { Level } from './core/level/level';
+import { GameState, gameStateManager } from './core/game-state';
+import { createCombatSystem, playerAction } from './systems/combat';
+import { createAnimationSystem, setAnimation } from './systems/animation';
+import { createParticleSystem } from './systems/particles';
 
 class Game {
   renderer: Renderer;
@@ -19,7 +23,8 @@ class Game {
   keyboard: Keyboard;
   level: Level;
   
-  systems: (() => void)[];
+  systems: ((dt: number) => void)[];
+  lastTime: number = 0;
 
   constructor() {
     this.renderer = new Renderer('game-canvas');
@@ -32,17 +37,34 @@ class Game {
 
     // Initialize systems
     this.systems = [
+      createAnimationSystem(),
       createPlayerSystem(this.keyboard),
       createStatsSystem(),
       createInteractionSystem(this.keyboard),
       createAISystem(),
+      createCombatSystem(),
       createPhysicsSystem(this.level),
+      createParticleSystem(),
       createUISystem(),
     ];
 
-    console.log('Phase 3: AI & Navigation Initialized');
+    console.log('Phase 4: Combat, Animation & Damage Initialized');
     this.setupWorld();
+    this.bindUI();
     this.start();
+  }
+
+  bindUI() {
+    document.querySelector('.action-grid')?.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest('.action-btn');
+      if (!btn) return;
+      
+      const label = btn.textContent?.trim().toLowerCase();
+      if (label === 'strike') playerAction('strike');
+      if (label === 'guard') playerAction('guard');
+      if (label === 'heal') playerAction('heal');
+      if (label === 'retreat') addLogEntry('Retreat not implemented yet.', 'system');
+    });
   }
 
   setupWorld() {
@@ -68,6 +90,25 @@ class Game {
       velocity: { x: 0, y: 0 },
       health: { current: 100, max: 100 },
       stamina: { current: 100, max: 100, regen: 0.2 },
+      sprite: { assetId: 'player', frame: 0, width: 32, height: 32 },
+      animator: {
+        sequences: {
+          idle: { frames: [0, 1], speed: 500, loop: true },
+          walk: { frames: [2, 3], speed: 200, loop: true },
+          die: { frames: [4], speed: 1000, loop: false }
+        },
+        currentSequence: 'idle',
+        currentFrameIndex: 0,
+        elapsedTime: 0,
+        isFinished: false
+      },
+      combat: {
+        isPlayerTurn: true,
+        engagedWith: '',
+        baseDamage: 25,
+        defenseModifier: 1.0,
+        hitFlashTimer: 0
+      }
     });
 
     // Spawn some monsters
@@ -81,12 +122,20 @@ class Game {
           type: 'monster',
           position: { x: mx * 64 + 32, y: my * 64 + 32 },
           velocity: { x: 0, y: 0 },
-          health: { current: 100, max: 100 },
+          health: { current: 50, max: 50 },
+          sprite: { assetId: 'monster', frame: 0, width: 32, height: 32 },
           ai: {
             fsm: createMonsterFSM(this.level),
             currentState: 'idle',
             detectionRadius: 200,
             visionAngle: 90,
+          },
+          combat: {
+            isPlayerTurn: false,
+            engagedWith: '',
+            baseDamage: 10,
+            defenseModifier: 1.0,
+            hitFlashTimer: 0
           }
         });
       }
@@ -102,12 +151,11 @@ class Game {
         onInteract: () => {
           addLogEntry('You flipped a heavy iron switch.', 'player');
           addLogEntry('A secret compartment opens...', 'system');
-          
           world.add({
             id: 'access-code-1',
             type: 'item',
             position: { x: startX + 120, y: startY + 120 },
-            sprite: { assetId: 'item-code', frame: 0 }
+            sprite: { assetId: 'item-code', frame: 0, width: 16, height: 16 }
           });
         }
       }
@@ -117,13 +165,19 @@ class Game {
   }
 
   start() {
-    requestAnimationFrame(this.loop.bind(this));
+    requestAnimationFrame((time) => {
+      this.lastTime = time;
+      this.loop(time);
+    });
   }
 
-  loop() {
+  loop(time: number) {
+    const dt = time - this.lastTime;
+    this.lastTime = time;
+
     // Update systems
     for (const system of this.systems) {
-      system();
+      system(dt);
     }
 
     // Update Camera to follow player
@@ -131,53 +185,25 @@ class Game {
     if (player && player.position) {
       this.renderer.camera.x = player.position.x;
       this.renderer.camera.y = player.position.y;
+
+      // Toggle walk/idle animation
+      if (gameStateManager.state === GameState.EXPLORATION) {
+        const isMoving = player.velocity && (Math.abs(player.velocity.x) > 0.5 || Math.abs(player.velocity.y) > 0.5);
+        setAnimation(player, isMoving ? 'walk' : 'idle');
+      }
     }
 
     // Render
     this.renderer.clear();
-    
-    // Draw Level
     this.renderer.renderLevel(this.level);
 
-    const ctx = this.renderer.ctx;
-    
     // Draw entities
     for (const entity of world.entities) {
-      if (!entity.position) continue;
-      
-      const screenPos = this.renderer.camera.worldToScreen(entity.position.x, entity.position.y);
-      
-      if (entity.type === 'player') {
-        ctx.fillStyle = '#ffb4a8';
-        ctx.fillRect(screenPos.x - 15, screenPos.y - 15, 30, 30);
-      } else if (entity.type === 'monster') {
-        ctx.fillStyle = '#ffb4ab'; // --color-error
-        ctx.beginPath();
-        ctx.moveTo(screenPos.x, screenPos.y - 15);
-        ctx.lineTo(screenPos.x - 15, screenPos.y + 15);
-        ctx.lineTo(screenPos.x + 15, screenPos.y + 15);
-        ctx.fill();
-      } else if (entity.type === 'switch') {
-        if (player && player.position && entity.interactive) {
-          const dist = Math.sqrt(
-            (player.position.x - entity.position.x) ** 2 +
-            (player.position.y - entity.position.y) ** 2
-          );
-          if (dist < entity.interactive.radius) {
-            ctx.shadowBlur = 10;
-            ctx.shadowColor = '#dfc29f';
-          }
-        }
-        ctx.strokeStyle = '#8b7355';
-        ctx.strokeRect(screenPos.x - 10, screenPos.y - 10, 20, 20);
-        ctx.shadowBlur = 0;
-      } else if (entity.type === 'item') {
-        ctx.fillStyle = '#82db6f';
-        ctx.beginPath();
-        ctx.arc(screenPos.x, screenPos.y, 5, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      if (entity.type === 'particle') continue;
+      this.renderer.renderEntity(entity, this.loader);
     }
+
+    this.renderer.renderParticles(world.entities);
 
     // Apply Player Luminance
     if (player && player.position) {

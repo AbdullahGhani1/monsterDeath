@@ -82,6 +82,54 @@ export class Renderer {
     }
   }
 
+  renderEntity(entity: { position?: { x: number; y: number }, combat?: { hitFlashTimer: number }, sprite?: { assetId: string, frame: number, width: number, height: number }, type: string }, loader: { getImage: (id: string) => HTMLImageElement | undefined }) {
+    if (!entity.position) return;
+    const screenPos = this.camera.worldToScreen(entity.position.x, entity.position.y);
+
+    // Hit Flash
+    if (entity.combat && entity.combat.hitFlashTimer > 0) {
+      this.ctx.filter = 'brightness(5) contrast(2)';
+    }
+
+    if (entity.sprite) {
+      const img = loader.getImage(entity.sprite.assetId);
+      if (img) {
+        const sw = entity.sprite.width || img.width;
+        const sh = entity.sprite.height || img.height;
+        const cols = Math.floor(img.width / sw);
+        const frameX = (entity.sprite.frame % cols) * sw;
+        const frameY = Math.floor(entity.sprite.frame / cols) * sh;
+
+        this.ctx.drawImage(
+          img,
+          frameX, frameY, sw, sh,
+          screenPos.x - (sw * this.camera.zoom) / 2,
+          screenPos.y - (sh * this.camera.zoom) / 2,
+          sw * this.camera.zoom,
+          sh * this.camera.zoom
+        );
+      } else {
+        // Placeholder
+        this.ctx.fillStyle = entity.type === 'player' ? '#ffb4a8' : '#ffb4ab';
+        this.ctx.fillRect(screenPos.x - 15, screenPos.y - 15, 30, 30);
+      }
+    }
+
+    this.ctx.filter = 'none';
+  }
+
+  renderParticles(entities: { type: string, position?: { x: number, y: number }, particle?: { color: string, life: number, maxLife: number, size: number } }[]) {
+    for (const e of entities) {
+      if (e.type === 'particle' && e.position && e.particle) {
+        const screenPos = this.camera.worldToScreen(e.position.x, e.position.y);
+        this.ctx.fillStyle = e.particle.color;
+        this.ctx.globalAlpha = e.particle.life / e.particle.maxLife;
+        this.ctx.fillRect(screenPos.x, screenPos.y, e.particle.size, e.particle.size);
+      }
+    }
+    this.ctx.globalAlpha = 1.0;
+  }
+
   renderLuminance(playerX: number, playerY: number, radius: number) {
     const screenPos = this.camera.worldToScreen(playerX, playerY);
     const grad = this.ctx.createRadialGradient(
