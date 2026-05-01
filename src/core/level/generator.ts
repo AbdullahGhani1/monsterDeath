@@ -1,7 +1,8 @@
 import { TileType, Level } from './level';
+import { BiomeConfig } from './manager';
 
 export class LevelGenerator {
-  static generate(width: number, height: number, tileSize: number): Level {
+  static generate(width: number, height: number, tileSize: number, config: BiomeConfig): Level {
     const tiles: TileType[][] = [];
 
     // Random fill
@@ -11,11 +12,11 @@ export class LevelGenerator {
         const rand = Math.random();
         if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
           tiles[y][x] = TileType.WALL;
-        } else if (rand < 0.2) {
+        } else if (rand < config.wallDensity) {
           tiles[y][x] = TileType.WALL;
-        } else if (rand < 0.25) {
+        } else if (rand < config.wallDensity + config.waterDensity) {
           tiles[y][x] = TileType.WATER;
-        } else if (rand < 0.3) {
+        } else if (rand < config.wallDensity + config.waterDensity + config.mudDensity) {
           tiles[y][x] = TileType.MUD;
         } else {
           tiles[y][x] = TileType.FLOOR;

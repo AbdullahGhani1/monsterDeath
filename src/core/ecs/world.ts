@@ -8,6 +8,20 @@ export type AnimationSequence = {
   loop: boolean;
 };
 
+export type InventoryItem = {
+  id: string;
+  count: number;
+};
+
+export type Mission = {
+  id: string;
+  type: 'kill' | 'interact';
+  target: string;
+  current: number;
+  required: number;
+  completed: boolean;
+};
+
 export type Entity = {
   id: string;
   type: 'player' | 'monster' | 'item' | 'switch' | 'particle';
@@ -25,6 +39,9 @@ export type Entity = {
     currentState: string;
     detectionRadius: number;
     visionAngle: number;
+    attackRange: number;
+    attackCooldown: number;
+    lastAttackTime: number;
   };
   path?: {
     points: Point[];
@@ -43,12 +60,25 @@ export type Entity = {
     baseDamage: number;
     defenseModifier: number;
     hitFlashTimer: number;
+    phase?: number;
   };
   particle?: {
     life: number;
     maxLife: number;
     color: string;
     size: number;
+    active: boolean;
+  };
+  inventory?: {
+    items: InventoryItem[];
+    maxCapacity: number;
+  };
+  missions?: {
+    active: Mission[];
+  };
+  nightVision?: {
+    isActive: boolean;
+    hasGoggles: boolean;
   };
 };
 

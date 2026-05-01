@@ -11,7 +11,7 @@ export const createCombatSystem = () => {
     const player = world.entities.find((e) => e.type === 'player');
     if (!player || !player.position || !player.combat) return;
 
-    // 1. Proximity Engagement (if not in combat)
+    // 1. Proximity Engagement
     if (gameStateManager.state === GameState.EXPLORATION) {
       const monsters = world.entities.filter((e) => e.type === 'monster' && e.position);
       for (const monster of monsters) {
@@ -26,21 +26,27 @@ export const createCombatSystem = () => {
       }
     }
 
-    // 2. Combat Flash Timer
-    const entitiesWithCombat = world.entities.filter(e => e.combat);
+    // 2. Combat Timers
+    const entitiesWithCombat = world.entities.filter(e => e.combat || e.ai);
     for (const e of entitiesWithCombat) {
-      if (e.combat!.hitFlashTimer > 0) {
-        e.combat!.hitFlashTimer -= dt;
+      if (e.combat && e.combat.hitFlashTimer > 0) {
+        e.combat.hitFlashTimer -= dt;
+      }
+      if (e.ai && e.ai.lastAttackTime > 0) {
+        e.ai.lastAttackTime -= dt;
       }
     }
 
     // 3. Turn-Based Logic (Monsters turn)
     if (gameStateManager.state === GameState.COMBAT && !player.combat.isPlayerTurn) {
       const target = world.entities.find(e => e.id === player.combat!.engagedWith);
-      if (target) {
-        // Monster attacks player
-        setTimeout(() => executeMonsterTurn(target, player), 1000);
-        player.combat.isPlayerTurn = true; // Wait for monster action
+      if (target && target.ai) {
+        // Monster respects cooldown even in turn-based for extra polish
+        if (target.ai.lastAttackTime <= 0) {
+          setTimeout(() => executeMonsterTurn(target, player), 1000);
+          player.combat.isPlayerTurn = true;
+          target.ai.lastAttackTime = target.ai.attackCooldown;
+        }
       } else {
         exitCombat(player);
       }
@@ -79,7 +85,7 @@ const executeMonsterTurn = (monster: Entity, player: Entity) => {
 
   const dmg = Math.floor(monster.combat.baseDamage * player.combat.defenseModifier);
   player.health.current = Math.max(0, player.health.current - dmg);
-  player.combat.defenseModifier = 1.0; // Reset player guard
+  player.combat.defenseModifier = 1.0; 
   player.combat.hitFlashTimer = 200;
 
   addLogEntry(`${monster.id} strikes for ${dmg} damage!`, 'monster');
@@ -92,7 +98,7 @@ const executeMonsterTurn = (monster: Entity, player: Entity) => {
   }
 };
 
-export const playerAction = (type: 'strike' | 'guard' | 'heal') => {
+export const playerAction = (type: 'strike' | 'guard' | 'heal', onLevelComplete?: () => void) => {
   const player = world.entities.find(e => e.type === 'player');
   const monster = world.entities.find(e => e.id === player?.combat?.engagedWith);
   
@@ -103,12 +109,39 @@ export const playerAction = (type: 'strike' | 'guard' | 'heal') => {
     monster.health.current = Math.max(0, monster.health.current - dmg);
     monster.combat.hitFlashTimer = 200;
     addLogEntry(`You strike for ${dmg} damage.`, 'player');
+
+    // Boss Multi-Phase Logic
+    if (monster.id.includes('sovereign') && monster.health.current < monster.health.max / 2 && monster.combat.phase === 1) {
+      monster.combat.phase = 2;
+      monster.combat.baseDamage *= 2;
+      monster.health.current += 100; // Burst heal
+      addLogEntry('THE ABYSSAL SOVEREIGN ENRAGES!', 'monster');
+      addLogEntry('PHASE 2: DAMAGE INCREASED.', 'system');
+    }
     
     if (monster.health.current <= 0) {
       addLogEntry(`${monster.id} slain!`, 'system');
       if (monster.position) {
         spawnDebris(monster.position.x, monster.position.y, '#ffb4ab');
       }
+      
+      // Mission Progress
+      if (player.missions) {
+        for (const m of player.missions.active) {
+          if (m.type === 'kill' && (m.target === 'monster' || m.id.includes('Elimination') || m.target === monster.id)) {
+            m.current++;
+            if (m.current >= m.required) {
+                m.completed = true;
+                addLogEntry(`MISSION COMPLETE: ${m.id}`, 'system');
+                // Trigger Level Advance
+                setTimeout(() => {
+                    if (onLevelComplete) onLevelComplete();
+                }, 2000);
+            }
+          }
+        }
+      }
+      
       world.remove(monster);
       exitCombat(player);
     } else {

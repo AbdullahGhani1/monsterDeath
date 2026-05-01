@@ -40,8 +40,28 @@ export class Renderer {
     this.camera.height = this.canvas.height;
   }
 
+  private shakeTimer: number = 0;
+  private shakeIntensity: number = 0;
+
   clear() {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    
+    // Screen Shake Update
+    if (this.shakeTimer > 0) {
+      this.shakeTimer -= 16; // Approx 1 frame at 60fps
+      const sx = (Math.random() - 0.5) * this.shakeIntensity;
+      const sy = (Math.random() - 0.5) * this.shakeIntensity;
+      this.ctx.translate(sx, sy);
+    }
+  }
+
+  triggerShake(duration: number, intensity: number) {
+    this.shakeTimer = duration;
+    this.shakeIntensity = intensity;
+  }
+
+  resetTransform() {
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
   renderLevel(level: { tileSize: number; width: number; height: number; getTile: (x: number, y: number) => number }) {
@@ -94,20 +114,34 @@ export class Renderer {
     if (entity.sprite) {
       const img = loader.getImage(entity.sprite.assetId);
       if (img) {
-        const sw = entity.sprite.width || img.width;
-        const sh = entity.sprite.height || img.height;
-        const cols = Math.floor(img.width / sw);
-        const frameX = (entity.sprite.frame % cols) * sw;
-        const frameY = Math.floor(entity.sprite.frame / cols) * sh;
+        // High-res static image handling
+        const isStatic = entity.sprite.width === img.width && entity.sprite.height === img.height;
+        
+        if (isStatic) {
+          const targetSize = 64; // Scale high-res to standard entity size
+          this.ctx.drawImage(
+            img,
+            screenPos.x - (targetSize * this.camera.zoom) / 2,
+            screenPos.y - (targetSize * this.camera.zoom) / 2,
+            targetSize * this.camera.zoom,
+            targetSize * this.camera.zoom
+          );
+        } else {
+          const sw = entity.sprite.width;
+          const sh = entity.sprite.height;
+          const cols = Math.floor(img.width / sw);
+          const frameX = (entity.sprite.frame % cols) * sw;
+          const frameY = Math.floor(entity.sprite.frame / cols) * sh;
 
-        this.ctx.drawImage(
-          img,
-          frameX, frameY, sw, sh,
-          screenPos.x - (sw * this.camera.zoom) / 2,
-          screenPos.y - (sh * this.camera.zoom) / 2,
-          sw * this.camera.zoom,
-          sh * this.camera.zoom
-        );
+          this.ctx.drawImage(
+            img,
+            frameX, frameY, sw, sh,
+            screenPos.x - (sw * this.camera.zoom) / 2,
+            screenPos.y - (sh * this.camera.zoom) / 2,
+            sw * this.camera.zoom,
+            sh * this.camera.zoom
+          );
+        }
       } else {
         // Placeholder
         this.ctx.fillStyle = entity.type === 'player' ? '#ffb4a8' : '#ffb4ab';
@@ -118,9 +152,9 @@ export class Renderer {
     this.ctx.filter = 'none';
   }
 
-  renderParticles(entities: { type: string, position?: { x: number, y: number }, particle?: { color: string, life: number, maxLife: number, size: number } }[]) {
+  renderParticles(entities: { type: string, position?: { x: number, y: number }, particle?: { color: string, life: number, maxLife: number, size: number, active: boolean } }[]) {
     for (const e of entities) {
-      if (e.type === 'particle' && e.position && e.particle) {
+      if (e.type === 'particle' && e.position && e.particle?.active) {
         const screenPos = this.camera.worldToScreen(e.position.x, e.position.y);
         this.ctx.fillStyle = e.particle.color;
         this.ctx.globalAlpha = e.particle.life / e.particle.maxLife;
@@ -130,17 +164,30 @@ export class Renderer {
     this.ctx.globalAlpha = 1.0;
   }
 
-  renderLuminance(playerX: number, playerY: number, radius: number) {
+  renderLuminance(playerX: number, playerY: number, radius: number, isNightVision: boolean = false) {
     const screenPos = this.camera.worldToScreen(playerX, playerY);
     const grad = this.ctx.createRadialGradient(
       screenPos.x, screenPos.y, 0,
       screenPos.x, screenPos.y, radius * this.camera.zoom
     );
-    grad.addColorStop(0, 'rgba(0,0,0,0)');
-    grad.addColorStop(1, 'rgba(0,0,0,0.8)');
+    
+    if (isNightVision) {
+      // Green-tinted pierce
+      grad.addColorStop(0, 'rgba(0, 255, 0, 0.1)');
+      grad.addColorStop(1, 'rgba(0, 50, 0, 0.6)');
+    } else {
+      grad.addColorStop(0, 'rgba(0,0,0,0)');
+      grad.addColorStop(1, 'rgba(0,0,0,0.8)');
+    }
 
     this.ctx.fillStyle = grad;
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+    if (isNightVision) {
+      // Full screen scanline effect or green overlay
+      this.ctx.fillStyle = 'rgba(0, 255, 0, 0.05)';
+      this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    }
   }
 
   // Basic frustum culling check
