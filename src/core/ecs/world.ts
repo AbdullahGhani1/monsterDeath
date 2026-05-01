@@ -1,4 +1,6 @@
 import { World } from 'miniplex';
+import { StateMachine } from '../ai/fsm';
+import { Point } from '../ai/astar';
 
 export type Entity = {
   id: string;
@@ -11,6 +13,16 @@ export type Entity = {
   interactive?: { 
     radius: number;
     onInteract: (player: Entity) => void;
+  };
+  ai?: {
+    fsm: StateMachine;
+    currentState: string;
+    detectionRadius: number;
+    visionAngle: number;
+  };
+  path?: {
+    points: Point[];
+    currentIndex: number;
   };
 };
 

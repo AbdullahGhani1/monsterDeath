@@ -44,6 +44,44 @@ export class Renderer {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
+  renderLevel(level: { tileSize: number; width: number; height: number; getTile: (x: number, y: number) => number }) {
+    const startTile = this.camera.screenToWorld(0, 0);
+    const endTile = this.camera.screenToWorld(this.canvas.width, this.canvas.height);
+
+    const startX = Math.floor(startTile.x / level.tileSize);
+    const startY = Math.floor(startTile.y / level.tileSize);
+    const endX = Math.ceil(endTile.x / level.tileSize);
+    const endY = Math.ceil(endTile.y / level.tileSize);
+
+    for (let y = startY; y <= endY; y++) {
+      for (let x = startX; x <= endX; x++) {
+        const tile = level.getTile(x, y);
+        const screenPos = this.camera.worldToScreen(x * level.tileSize, y * level.tileSize);
+        
+        switch (tile) {
+          case 0: // FLOOR
+            this.ctx.fillStyle = '#1d100e';
+            break;
+          case 1: // WALL
+            this.ctx.fillStyle = '#362623';
+            break;
+          case 2: // WATER
+            this.ctx.fillStyle = '#006300';
+            break;
+          case 3: // MUD
+            this.ctx.fillStyle = '#42312e';
+            break;
+        }
+        
+        this.ctx.fillRect(
+          screenPos.x, screenPos.y, 
+          level.tileSize * this.camera.zoom + 1, 
+          level.tileSize * this.camera.zoom + 1
+        );
+      }
+    }
+  }
+
   renderLuminance(playerX: number, playerY: number, radius: number) {
     const screenPos = this.camera.worldToScreen(playerX, playerY);
     const grad = this.ctx.createRadialGradient(

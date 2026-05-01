@@ -27,10 +27,6 @@ export const createPlayerSystem = (keyboard: Keyboard) => {
         player.velocity.x *= ratio;
         player.velocity.y *= ratio;
       }
-
-      // Update position
-      player.position.x += player.velocity.x;
-      player.position.y += player.velocity.y;
     }
   };
 };
