@@ -1,310 +1,470 @@
-import { Renderer } from './core/renderer/renderer';
-import { AudioMixer } from './core/audio/mixer';
-import { AssetLoader } from './assets/loader';
-import { world, Entity } from './core/ecs/world';
-import { Keyboard } from './core/input/keyboard';
-import { createPlayerSystem } from './systems/player';
-import { createStatsSystem } from './systems/stats';
-import { createUISystem, addLogEntry, togglePDA, showLevelSplash, showVictory } from './systems/ui';
-import { createInteractionSystem } from './systems/interaction';
-import { LevelGenerator } from './core/level/generator';
-import { createAISystem, createMonsterFSM } from './systems/ai';
-import { createPhysicsSystem } from './systems/physics';
-import { Level } from './core/level/level';
-import { GameState, gameStateManager } from './core/game-state';
-import { createCombatSystem, playerAction } from './systems/combat';
-import { createAnimationSystem, setAnimation } from './systems/animation';
-import { createParticleSystem } from './systems/particles';
-import { createInventorySystem } from './systems/inventory';
-import { levelManager } from './core/level/manager';
+// ─── MONSTER DEATH — game bootstrap & main loop ─────────────────────────────
+//
+// Flow: TITLE → CHARACTER SELECT → chapter intro DIALOGUE → FIGHT (waves +
+// boss) → RESULTS → SANCTUM (upgrades) → next chapter … → VICTORY.
+// The fight runs a fixed-flow loop with hitstop and slow-motion timescales
+// for Tekken-style impact feel.
+
+import { CHAPTERS } from './data/story';
+import { CharacterDef } from './data/types';
+import { audio } from './engine/audio';
+import { Camera } from './engine/camera';
+import { fx } from './engine/fx';
+import { Action, Input } from './engine/input';
+import { CombatSystem } from './game/combat';
+import { Director } from './game/director';
+import { ARENA, Fighter, nearest } from './game/fighter';
+import { applyUpgrades, computeGrade, gradeRank, loadSave, persistSave } from './game/save';
+import { StageRenderer } from './game/stage';
+import { drawFighter, drawShadow } from './rig/render';
+import { HUD } from './ui/hud';
+import { Screens } from './ui/screens';
+
+type Mode =
+  | 'title'
+  | 'select'
+  | 'dialogue'
+  | 'fight'
+  | 'paused'
+  | 'gameover'
+  | 'victory'
+  | 'menu-misc';
 
 class Game {
-  renderer: Renderer;
-  audio: AudioMixer;
-  loader: AssetLoader;
-  keyboard: Keyboard;
-  level!: Level;
-  
-  systems: ((dt: number) => void)[] = [];
-  lastTime: number = 0;
+  private canvas = document.getElementById('game-canvas') as HTMLCanvasElement;
+  private ctx = this.canvas.getContext('2d')!;
+  private input = new Input();
+  private camera = new Camera(window.innerWidth, window.innerHeight);
+  private stage = new StageRenderer();
+  private combat = new CombatSystem();
+  private screens = new Screens();
+  private hud!: HUD;
+  private save = loadSave();
+
+  private mode: Mode = 'title';
+  private player: Fighter | null = null;
+  private director: Director | null = null;
+  private chapterIndex = 0; // 0-based into CHAPTERS
+  private char: CharacterDef | null = null;
+
+  private lastTime = 0;
+  private elapsed = 0; // seconds, for ambient animation
+  private hitstopT = 0;
+  private slowmoT = 0;
+  private deathTimer = 0;
+  private clearedHandled = false;
 
   constructor() {
-    this.renderer = new Renderer('game-canvas');
-    this.audio = new AudioMixer();
-    this.loader = new AssetLoader();
-    this.keyboard = new Keyboard();
-
-    console.log('Phase 7: Optimization & Polish');
-    this.init();
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+    this.hud = new HUD();
+    this.hud.show(false);
+    this.bindTouch();
+    this.bindMute();
+    this.screens.showTitle(this.save, () => this.toSelect());
+    requestAnimationFrame((t) => {
+      this.lastTime = t;
+      this.loop(t);
+    });
   }
 
-  async init() {
-    // Preload Assets
-    await this.loader.loadImage('player', 'assets/3d_character_model_of_a_dark_fantasy_mercenary_protagonist._battle_worn_but/screen.png');
-    await this.loader.loadImage('swarm', 'assets/3d_monster_model_design_level_1_enemy._shadow_stalker_an_emaciated_hunched/screen.png');
-    await this.loader.loadImage('brute', 'assets/3d_monster_model_design_level_2_enemy._ironhide_behemoth_a_massive_hulking/screen.png');
-    await this.loader.loadImage('hexer', 'assets/3d_monster_model_design_level_3_enemy._plague_weaver_a_floating_skeletal_mage/screen.png');
-    await this.loader.loadImage('warden', 'assets/3d_monster_model_design_level_4_enemy._corrupted_warden_a_fallen_knight_acting/screen.png');
-    await this.loader.loadImage('sovereign', 'assets/3d_monster_model_design_level_5_final_boss_the_abyssal_sovereign._a_towering/screen.png');
-    
-    // Preload Audio
-    try {
-      const music = await this.loader.loadAudio('bg-music', 'assets/The_Iron_Rite.mp3', (this.audio as unknown as { context: AudioContext }).context);
-      this.audio.playSound(music, 'music');
-    } catch {
-      console.warn('Audio could not be loaded or auto-played.');
+  private resize(): void {
+    this.canvas.width = window.innerWidth;
+    this.canvas.height = window.innerHeight;
+    this.camera.resize(this.canvas.width, this.canvas.height);
+  }
+
+  private bindTouch(): void {
+    document.querySelectorAll<HTMLElement>('[data-action]').forEach((btn) => {
+      const action = btn.dataset.action as Action;
+      const press = (e: Event) => {
+        e.preventDefault();
+        audio.unlock();
+        this.input.press(action);
+        btn.classList.add('pressed');
+      };
+      const release = (e: Event) => {
+        e.preventDefault();
+        this.input.release(action);
+        btn.classList.remove('pressed');
+      };
+      btn.addEventListener('pointerdown', press);
+      btn.addEventListener('pointerup', release);
+      btn.addEventListener('pointerleave', release);
+      btn.addEventListener('pointercancel', release);
+    });
+  }
+
+  private bindMute(): void {
+    document.getElementById('btn-sound')?.addEventListener('click', () => {
+      audio.unlock();
+      const muted = audio.toggleMute();
+      const el = document.getElementById('btn-sound');
+      if (el) el.textContent = muted ? '🔇' : '🔊';
+    });
+  }
+
+  // ── Flow transitions ───────────────────────────────────────────────────────
+
+  private toTitle(): void {
+    this.mode = 'title';
+    this.hud.show(false);
+    this.player = null;
+    this.director = null;
+    this.screens.showTitle(this.save, () => this.toSelect());
+  }
+
+  private toSelect(): void {
+    this.mode = 'select';
+    this.hud.show(false);
+    this.screens.showSelect(this.save, (c, chapter) => {
+      this.char = c;
+      this.save.lastCharacter = c.id;
+      persistSave(this.save);
+      this.chapterIndex = chapter - 1;
+      this.startChapterIntro();
+    });
+  }
+
+  private startChapterIntro(): void {
+    const chapter = CHAPTERS[this.chapterIndex];
+    this.mode = 'dialogue';
+    this.prepareFightWorld(); // build arena behind the dialogue
+    this.screens.showDialogue(chapter.intro, this.char?.name ?? 'CHAMPION', () =>
+      this.startFight()
+    );
+  }
+
+  private prepareFightWorld(): void {
+    const chapter = CHAPTERS[this.chapterIndex];
+    this.stage.setTheme(chapter.theme);
+    const up = applyUpgrades(this.save);
+    this.player = new Fighter({
+      kind: 'player',
+      char: this.char!,
+      x: 220,
+      z: 120,
+      hpScale: up.hpScale,
+      dmgScale: up.dmgScale,
+    });
+    this.player.heatRate *= up.heatScale;
+    this.director = new Director(chapter);
+    this.combat.reset();
+    this.clearedHandled = false;
+    this.deathTimer = 0;
+    this.hud.setIdentity(`${this.char!.name} — ${this.char!.title}`);
+    this.hud.setChapter(`${chapter.title} · ${chapter.subtitle}`);
+    audio.setIntensity(0.4);
+  }
+
+  private startFight(): void {
+    this.mode = 'fight';
+    this.screens.hide();
+    this.hud.show(true);
+    this.hud.announce(CHAPTERS[this.chapterIndex].title, CHAPTERS[this.chapterIndex].subtitle);
+  }
+
+  private onChapterCleared(): void {
+    if (this.clearedHandled || !this.director || !this.player) return;
+    this.clearedHandled = true;
+    this.player.state = 'victory';
+    this.player.stateT = 0;
+
+    const chapter = CHAPTERS[this.chapterIndex];
+    const stats = this.director.stats;
+    const grade = computeGrade(stats.damageTaken / this.player.maxHp, stats.maxCombo, stats.timeMs);
+    const prev = this.save.bestGrades[chapter.id];
+    const isBest = !prev || gradeRank(grade) > gradeRank(prev);
+    if (isBest) this.save.bestGrades[chapter.id] = grade;
+    this.save.souls += stats.soulsEarned + chapter.soulsBonus;
+    this.save.chapterReached = Math.max(this.save.chapterReached, Math.min(7, chapter.id + 1));
+    persistSave(this.save);
+
+    window.setTimeout(() => {
+      this.mode = 'menu-misc';
+      this.hud.show(false);
+      this.screens.showDialogue(chapter.outro, this.char!.name, () => {
+        this.screens.showResults(
+          `${chapter.title} · ${chapter.subtitle}`,
+          grade,
+          stats,
+          chapter.soulsBonus,
+          isBest,
+          () => {
+            this.screens.showShop(
+              this.save,
+              () => persistSave(this.save),
+              () => {
+                if (chapter.id >= 7) {
+                  this.save.victories++;
+                  persistSave(this.save);
+                  this.mode = 'victory';
+                  this.screens.showVictory(() => this.toTitle());
+                } else {
+                  this.chapterIndex++;
+                  this.startChapterIntro();
+                }
+              }
+            );
+          }
+        );
+      });
+    }, 1600);
+  }
+
+  private onPlayerDeath(): void {
+    // Keep what you earned — death still feeds progression.
+    if (this.director) {
+      this.save.souls += this.director.stats.soulsEarned;
+      persistSave(this.save);
+    }
+    this.mode = 'gameover';
+    this.hud.show(false);
+    this.screens.showGameOver(
+      this.save.souls,
+      () => {
+        this.prepareFightWorld();
+        this.startFight();
+      },
+      () => this.toSelect()
+    );
+  }
+
+  private togglePause(): void {
+    if (this.mode === 'fight') {
+      this.mode = 'paused';
+      this.screens.showPause(
+        audio.muted,
+        () => {
+          this.mode = 'fight';
+          this.screens.hide();
+        },
+        () => this.toSelect(),
+        () => audio.toggleMute()
+      );
+    } else if (this.mode === 'paused') {
+      this.mode = 'fight';
+      this.screens.hide();
+    }
+  }
+
+  // ── Main loop ──────────────────────────────────────────────────────────────
+
+  private loop(time: number): void {
+    const rawDt = Math.min(50, time - this.lastTime);
+    this.lastTime = time;
+    this.elapsed += rawDt / 1000;
+
+    if (this.input.justPressed('pause') && (this.mode === 'fight' || this.mode === 'paused')) {
+      this.togglePause();
     }
 
-    this.startLevel();
-    this.bindUI();
-    this.start();
+    // Timescale: hitstop freezes the world; slow-mo stretches rage arts.
+    let dt = rawDt;
+    if (this.hitstopT > 0) {
+      this.hitstopT -= rawDt;
+      dt = 0;
+    } else if (this.slowmoT > 0) {
+      this.slowmoT -= rawDt;
+      dt = rawDt * 0.3;
+    }
+
+    if (
+      (this.mode === 'fight' ||
+        this.mode === 'dialogue' ||
+        this.mode === 'gameover' ||
+        this.mode === 'menu-misc') &&
+      this.player &&
+      this.director
+    ) {
+      this.updateFight(dt, this.mode === 'fight');
+    }
+
+    this.render();
+    this.input.endFrame(rawDt);
+    requestAnimationFrame((t) => this.loop(t));
   }
 
-  startLevel() {
-    const config = levelManager.getNextBiome();
-    if (!config) {
-      showVictory();
+  private updateFight(dt: number, interactive: boolean): void {
+    const player = this.player!;
+    const director = this.director!;
+    const groundY = (z: number) => this.stage.groundY(z, this.canvas.height) + this.camera.offY;
+
+    if (dt > 0) {
+      player.update(dt);
+      if (interactive && player.alive) {
+        player.control(this.input, dt, director.aliveMonsters);
+        if (player.heatJustActivated) {
+          player.heatJustActivated = false;
+          audio.sfx('heat');
+          fx.ring(player.x, groundY(player.z), 70, player.style.palette.glow);
+          this.camera.shake(8, 250);
+          this.hitstopT = 120;
+          this.hud.announce('HEAT BURST', '');
+        }
+        if (player.rageJustStarted) {
+          player.rageJustStarted = false;
+          audio.sfx('rage');
+          this.slowmoT = 900;
+          this.camera.shake(10, 500);
+          this.hud.announce(player.charDef!.moves.rage.name.replace('RAGE ART: ', ''), 'RAGE ART');
+        }
+      }
+
+      for (const m of director.monsters) m.update(dt);
+      for (const c of director.corpses) c.f.update(dt);
+
+      if (interactive) {
+        director.update(dt, player, {
+          announce: (t, s) => this.hud.announce(t, s),
+          groundY,
+          onCleared: () => this.onChapterCleared(),
+        });
+
+        this.combat.update(dt, player, director.monsters, {
+          groundY,
+          shake: (a, ms) => this.camera.shake(a, ms),
+          hitstop: (ms) => (this.hitstopT = Math.max(this.hitstopT, ms)),
+          onPlayerLandedHit: () => undefined,
+          onPlayerWasHit: (dmg) => director.registerPlayerDamage(dmg),
+          onKill: (t) => director.registerKill(t),
+        });
+
+        if (!player.alive) {
+          this.deathTimer += dt;
+          if (this.deathTimer > 1800 && this.mode === 'fight') this.onPlayerDeath();
+        }
+      }
+    }
+
+    fx.update(dt / 1000);
+
+    const focus = nearest(player, director.aliveMonsters);
+    this.camera.follow(player.x, focus ? focus.x : null, ARENA.width);
+    this.camera.update(Math.max(dt, 1));
+
+    if (this.mode === 'fight') {
+      this.hud.update(
+        Math.max(dt, 1),
+        player,
+        director.boss && director.boss.alive ? director.boss : null,
+        this.save.souls + director.stats.soulsEarned
+      );
+    }
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  private render(): void {
+    const ctx = this.ctx;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    if (!this.player || !this.director) {
+      // Menu backdrop: slow abyss gradient
+      const g = ctx.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, '#0a0512');
+      g.addColorStop(1, '#241133');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
       return;
     }
 
-    showLevelSplash(levelManager.currentLevel, config.levelTitle);
-    
-    const playerEntity = world.entities.find(e => e.type === 'player');
-    const existingEntities = [...world.entities];
-    for (const e of existingEntities) {
-      if (e.type !== 'player' && e.type !== 'particle') world.remove(e);
-    }
+    this.stage.render(ctx, this.camera, this.elapsed, 1 / 60);
 
-    this.level = LevelGenerator.generate(50, 50, 64, config);
+    // Depth-sort all actors (far lane first)
+    const player = this.player;
+    const director = this.director;
+    const actors: { f: Fighter; corpseAlpha?: number }[] = [
+      ...director.corpses.map((c) => ({ f: c.f, corpseAlpha: Math.min(1, c.t / 900) })),
+      ...director.monsters.map((f) => ({ f })),
+      { f: player },
+    ].sort((a, b) => a.f.z - b.f.z);
 
-    this.systems = [
-      createAnimationSystem(),
-      createPlayerSystem(this.keyboard),
-      createStatsSystem(),
-      createInteractionSystem(this.keyboard),
-      createAISystem(),
-      createCombatSystem(),
-      createInventorySystem(),
-      createPhysicsSystem(this.level),
-      createParticleSystem(),
-      createUISystem(),
-    ];
+    for (const { f, corpseAlpha } of actors) {
+      const scale = this.camera.zoom * this.stage.depthScale(f.z);
+      const gy = this.stage.groundY(f.z, h) + this.camera.offY;
+      const sx = this.camera.sx(f.x);
+      const lift = (f.y + f.hoverOffset()) * scale;
 
-    this.setupWorld(playerEntity);
-  }
-
-  advanceLevel() {
-    levelManager.advance();
-    this.startLevel();
-  }
-
-  bindUI() {
-    document.getElementById('btn-strike')?.addEventListener('click', () => {
-      playerAction('strike', () => this.advanceLevel());
-      this.renderer.triggerShake(200, 5);
-    });
-    document.getElementById('btn-guard')?.addEventListener('click', () => playerAction('guard'));
-    document.getElementById('btn-heal')?.addEventListener('click', () => playerAction('heal'));
-    
-    document.getElementById('btn-nvg')?.addEventListener('click', () => {
-      const player = world.entities.find(e => e.type === 'player');
-      if (player && player.nightVision) {
-        if (player.nightVision.hasGoggles) {
-          player.nightVision.isActive = !player.nightVision.isActive;
-          addLogEntry(`Night Vision ${player.nightVision.isActive ? 'ON' : 'OFF'}`, 'system');
-        } else {
-          addLogEntry('Night Vision Goggles required.', 'system');
-        }
-      }
-    });
-
-    document.getElementById('nav-pda')?.addEventListener('click', () => {
-      togglePDA();
-      this.audio.applyDampening(document.getElementById('pda-modal')?.style.display === 'block');
-    });
-
-    document.getElementById('pda-close')?.addEventListener('click', () => {
-      this.audio.applyDampening(false);
-    });
-
-    document.getElementById('nav-battle')?.addEventListener('click', () => {
-       const pdaModal = document.getElementById('pda-modal');
-       if (pdaModal) pdaModal.style.display = 'none';
-       this.audio.applyDampening(false);
-    });
-  }
-
-  setupWorld(existingPlayer: Entity | undefined) {
-    const config = levelManager.getNextBiome()!;
-
-    let startX = 25 * 64;
-    let startY = 25 * 64;
-    
-    for (let y = 0; y < this.level.height; y++) {
-      for (let x = 0; x < this.level.width; x++) {
-        if (this.level.isPassable(x, y)) {
-          startX = x * 64 + 32;
-          startY = y * 64 + 32;
-          break;
-        }
-      }
-    }
-
-    if (existingPlayer) {
-        existingPlayer.position = { x: startX, y: startY };
-        existingPlayer.velocity = { x: 0, y: 0 };
-        existingPlayer.missions = {
-            active: [
-                { 
-                    id: `${config.monsterType === 'sovereign' ? 'Final Boss' : 'Elimination'}`, 
-                    type: 'kill', 
-                    target: config.monsterType, 
-                    current: 0, 
-                    required: config.monsterCount, 
-                    completed: false 
-                }
-            ]
-        };
-    } else {
-        const img = this.loader.getImage('player')!;
-        world.add({
-            id: 'player-1',
-            type: 'player',
-            position: { x: startX, y: startY },
-            velocity: { x: 0, y: 0 },
-            health: { current: 100, max: 100 },
-            stamina: { current: 100, max: 100, regen: 0.2 },
-            sprite: { assetId: 'player', frame: 0, width: img.width, height: img.height },
-            animator: {
-              sequences: {
-                idle: { frames: [0], speed: 500, loop: true },
-                walk: { frames: [0], speed: 200, loop: true },
-                die: { frames: [0], speed: 1000, loop: false }
-              },
-              currentSequence: 'idle',
-              currentFrameIndex: 0,
-              elapsedTime: 0,
-              isFinished: false
-            },
-            combat: {
-              isPlayerTurn: true,
-              engagedWith: '',
-              baseDamage: 25,
-              defenseModifier: 1.0,
-              hitFlashTimer: 0
-            },
-            inventory: {
-              items: [],
-              maxCapacity: 20
-            },
-            missions: {
-              active: [
-                { id: 'Elimination', type: 'kill', target: 'swarm', current: 0, required: 5, completed: false }
-              ]
-            },
-            nightVision: {
-              isActive: false,
-              hasGoggles: true
-            }
-          });
-    }
-
-    for (let i = 0; i < config.monsterCount; i++) {
-      const mx = Math.floor(Math.random() * this.level.width);
-      const my = Math.floor(Math.random() * this.level.height);
-      
-      if (this.level.isPassable(mx, my)) {
-        const isBoss = config.monsterType === 'sovereign';
-        let hp = 50;
-        let dmg = 10;
-        let radius = config.lightRadius;
-        
-        if (config.monsterType === 'brute') { hp = 150; dmg = 15; }
-        if (config.monsterType === 'hexer') { hp = 40; dmg = 25; radius = 400; }
-        if (config.monsterType === 'warden') { hp = 100; dmg = 20; }
-        if (isBoss) { hp = 800; dmg = 35; }
-
-        const mImg = this.loader.getImage(config.monsterType)!;
-
-        world.add({
-          id: `${config.monsterType}-${i}`,
-          type: 'monster',
-          position: { x: mx * 64 + 32, y: my * 64 + 32 },
-          velocity: { x: 0, y: 0 },
-          health: { current: hp, max: hp },
-          sprite: { assetId: config.monsterType, frame: 0, width: mImg.width, height: mImg.height },
-          ai: {
-            fsm: createMonsterFSM(this.level),
-            currentState: 'idle',
-            detectionRadius: radius,
-            visionAngle: 90,
-            attackRange: 50,
-            attackCooldown: 2000,
-            lastAttackTime: 0
-          },
-          combat: {
-            isPlayerTurn: false,
-            engagedWith: '',
-            baseDamage: dmg,
-            defenseModifier: 1.0,
-            hitFlashTimer: 0,
-            phase: 1
-          }
+      // Teleport echoes
+      for (const e of f.echoes) {
+        drawFighter(ctx, {
+          x: this.camera.sx(e.x),
+          y: this.stage.groundY(e.z, h) + this.camera.offY,
+          facing: e.facing,
+          scale,
+          style: f.style,
+          pose: e.pose,
+          t: this.elapsed,
+          ghost: true,
+          alpha: e.t * 2,
         });
       }
-    }
 
-    addLogEntry(`Entered ${config.levelTitle}.`, 'system');
-  }
-
-  start() {
-    requestAnimationFrame((time) => {
-      this.lastTime = time;
-      this.loop(time);
-    });
-  }
-
-  loop(time: number) {
-    const dt = time - this.lastTime;
-    this.lastTime = time;
-
-    for (const system of this.systems) {
-      system(dt);
-    }
-
-    const player = world.entities.find(e => e.type === 'player');
-    if (player && player.position) {
-      this.renderer.camera.x = player.position.x;
-      this.renderer.camera.y = player.position.y;
-
-      if (gameStateManager.state === GameState.EXPLORATION) {
-        const isMoving = player.velocity && (Math.abs(player.velocity.x) > 0.5 || Math.abs(player.velocity.y) > 0.5);
-        setAnimation(player, isMoving ? 'walk' : 'idle');
-      }
-    }
-
-    this.renderer.clear();
-    this.renderer.renderLevel(this.level);
-
-    for (const entity of world.entities) {
-      if (entity.type === 'particle') continue;
-      this.renderer.renderEntity(entity, this.loader);
-    }
-
-    this.renderer.renderParticles(world.entities as { type: string, position?: { x: number, y: number }, particle?: { color: string, life: number, maxLife: number, size: number, active: boolean } }[]);
-
-    if (player && player.position) {
-      const config = levelManager.getNextBiome();
-      this.renderer.renderLuminance(
-        player.position.x, 
-        player.position.y, 
-        config?.lightRadius || 300, 
-        player.nightVision?.isActive
+      drawShadow(
+        ctx,
+        sx,
+        gy,
+        34 * scale * f.style.proportions.scale,
+        Math.max(0.25, 1 - (f.y + f.hoverOffset()) / 320) * (corpseAlpha ?? 1)
       );
+      drawFighter(ctx, {
+        x: sx,
+        y: gy - lift,
+        facing: f.facing,
+        scale,
+        style: f.style,
+        pose: f.getPose(),
+        t: this.elapsed,
+        flash: f.flash,
+        heat: f.heatActive,
+        rage: f.kind === 'player' ? f.rageReady : f.boss && f.heatActive,
+        alpha: corpseAlpha,
+        trail: f.trail(),
+      });
     }
 
-    this.renderer.resetTransform();
-    requestAnimationFrame(this.loop.bind(this));
+    this.combat.renderProjectiles(
+      ctx,
+      (x) => this.camera.sx(x),
+      (z) => this.stage.groundY(z, h),
+      this.camera.zoom,
+      this.camera.offY
+    );
+
+    fx.render(ctx, this.camera);
+
+    // Vignette + low-health pulse
+    const vig = ctx.createRadialGradient(
+      w / 2,
+      h / 2,
+      Math.min(w, h) * 0.42,
+      w / 2,
+      h / 2,
+      Math.max(w, h) * 0.72
+    );
+    vig.addColorStop(0, 'rgba(0,0,0,0)');
+    vig.addColorStop(1, 'rgba(0,0,0,0.55)');
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, w, h);
+
+    if (player.alive && player.hp / player.maxHp <= 0.3) {
+      const pulse = 0.12 + Math.sin(this.elapsed * 5) * 0.06;
+      const red = ctx.createRadialGradient(
+        w / 2,
+        h / 2,
+        Math.min(w, h) * 0.4,
+        w / 2,
+        h / 2,
+        Math.max(w, h) * 0.7
+      );
+      red.addColorStop(0, 'rgba(255,0,30,0)');
+      red.addColorStop(1, `rgba(255,0,30,${pulse})`);
+      ctx.fillStyle = red;
+      ctx.fillRect(0, 0, w, h);
+    }
   }
 }
 

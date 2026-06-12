@@ -2,35 +2,35 @@ name: CI/CD
 
 on:
   push:
-    branches: [ master ]
+    branches: [master]
   pull_request:
-    branches: [ master ]
+    branches: [master]
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Use Node.js 20
-      uses: actions/setup-node@v4
-      with:
-        node-version: 20
-        cache: 'npm'
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
 
-    - name: Install dependencies
-      run: npm install
+      - name: Install dependencies
+        run: npm install
 
-    - name: Lint
-      run: npm run lint
+      - name: Lint
+        run: npm run lint
 
-    - name: Build
-      run: npm run build
+      - name: Build
+        run: npm run build
 
-    - name: Install surge
-      run: npm install --global surge
-  
-    - name: Deploy to Surge
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-      run: surge ./dist/ monster-death.surge.sh/ --token ${{ secrets.JS_TOKEN }}
+      - name: Install surge
+        run: npm install --global surge
+
+      - name: Deploy to Surge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: surge ./dist/ monster-death.surge.sh/ --token ${{ secrets.JS_TOKEN }}
